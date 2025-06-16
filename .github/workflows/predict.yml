@@ -65,9 +65,9 @@ jobs:
       #     fi
 
       - name: Print result to CI log
-        if: |
-          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-          (github.event_name == 'pull_request' && github.base_ref == 'main')
+        # if: |
+        #   (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        #   (github.event_name == 'pull_request' && github.base_ref == 'main')
         run: |
           echo "=== ETF Prediction Result ==="
           cat result.json
