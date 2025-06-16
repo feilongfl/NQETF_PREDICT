@@ -33,7 +33,7 @@ jobs:
 
       - name: Run prediction script
         run: |
-          python main.py run --source akshare --lookback_days 60 --etf_symbol 159941
+          python main.py run --source yfinance --lookback_days 60 --etf_symbol 159941.SZ
 
       - name: Read result.json
         id: read_result
