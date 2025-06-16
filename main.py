@@ -1,14 +1,14 @@
-# requirements: pip install yfinance akshare fire loguru pandas numpy
-
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Optional
 import datetime
-
 import pandas as pd
 import numpy as np
 import fire
 from loguru import logger
 
+# Configure loguru to output JSON
+logger.remove()
+logger.add("log.json", rotation="1 MB", serialize=True, level="INFO")
 
 @dataclass
 class PredictorConfig:
@@ -25,24 +25,20 @@ class PredictorConfig:
 class ETFOpenPredictor:
     def __init__(self, config: Optional[PredictorConfig] = None):
         self.cfg = config or PredictorConfig()
-        logger.remove()
-        logger.add(lambda msg: print(msg, end=""), level="INFO")
+        # Log initial config
+        logger.info("config", **asdict(self.cfg))
 
     def fetch_yfinance(self, symbol: str, start: datetime.date, end: datetime.date):
         import yfinance as yf
-        logger.info(f"[fetch_yfinance] symbol={symbol}, start={start}, end={end}, interval={self.cfg.interval}")
-        df = yf.download(symbol,
-                         start=start,
-                         end=end,
-                         interval=self.cfg.interval,
-                         auto_adjust=False,
-                         progress=False)
-        logger.info(f"[fetch_yfinance] {symbol} rows={len(df)}")
+        logger.info("fetch_yfinance.start", symbol=symbol, start=str(start), end=str(end), interval=self.cfg.interval)
+        df = yf.download(symbol, start=start, end=end, interval=self.cfg.interval,
+                         auto_adjust=False, progress=False)
+        logger.info("fetch_yfinance.end", symbol=symbol, rows=len(df))
         return df
 
     def fetch_akshare(self, symbol: str, start: datetime.date, end: datetime.date):
         import akshare as ak
-        logger.info(f"[fetch_akshare] symbol={symbol}, start={start}, end={end}")
+        logger.info("fetch_akshare.start", symbol=symbol, start=str(start), end=str(end))
         df = ak.stock_zh_a_hist(
             symbol=symbol,
             period="daily",
@@ -51,7 +47,7 @@ class ETFOpenPredictor:
             adjust=""
         )
         if df.empty:
-            logger.warning(f"[fetch_akshare] no data for {symbol}")
+            logger.warning("fetch_akshare.empty", symbol=symbol)
             return df
         df = (
             df.rename(columns={
@@ -65,21 +61,21 @@ class ETFOpenPredictor:
               .set_index("Date")
         )
         df.index = pd.to_datetime(df.index)
-        logger.info(f"[fetch_akshare] {symbol} rows={len(df)}")
+        logger.info("fetch_akshare.end", symbol=symbol, rows=len(df))
         return df
 
     def fetch_data(self, symbol, start: datetime.date, end: datetime.date):
         sym_str = str(symbol)
-        logger.info(f"[fetch_data] source={self.cfg.source}, symbol={sym_str}")
+        logger.info("fetch_data", source=self.cfg.source, symbol=sym_str)
         if self.cfg.source == "akshare" and sym_str.isdigit():
             df = self.fetch_akshare(sym_str, start, end)
             if not df.empty:
                 return df
-            logger.info(f"[fetch_data] fallback to yfinance for {sym_str}")
+            logger.info("fetch_data.fallback", symbol=sym_str)
         return self.fetch_yfinance(sym_str, start, end)
 
     def prepare_features(self, df_etf, df_ndx, df_nq, df_vix, df_fx):
-        logger.info(f"[prepare_features] lookback_days={self.cfg.lookback_days}")
+        logger.info("prepare_features.start", lookback_days=self.cfg.lookback_days)
         df = pd.DataFrame(index=df_etf.index)
         df["ETF_close"] = df_etf["Close"]
         df["NDX"] = df_ndx["Close"].reindex(df.index).ffill()
@@ -90,11 +86,11 @@ class ETFOpenPredictor:
         df["FX_ret"] = df["USDCNY"].pct_change(fill_method=None)
         df["volume_change"] = df_etf["Volume"].pct_change(fill_method=None)
         df.dropna(inplace=True)
-        logger.info(f"[prepare_features] final rows={len(df)}, columns={list(df.columns)}")
+        logger.info("prepare_features.end", rows=len(df), columns=list(df.columns))
         return df
 
     def rolling_predict(self, df: pd.DataFrame):
-        logger.info(f"[rolling_predict] start predicting, rows={len(df)}")
+        logger.info("rolling_predict.start", rows=len(df), lookback_days=self.cfg.lookback_days)
         features = ["NDX", "NQ", "ETF_prev", "FX_ret", "volume_change"]
         preds = []
         for i in range(self.cfg.lookback_days, len(df)):
@@ -107,7 +103,7 @@ class ETFOpenPredictor:
             preds.append(float(x_today.dot(beta)))
         df_pred = df.iloc[self.cfg.lookback_days :].copy()
         df_pred["pred_open"] = preds
-        logger.info(f"[rolling_predict] predictions count={len(preds)}")
+        logger.info("rolling_predict.end", predictions=len(preds))
         return df_pred
 
     def run(self, 
@@ -127,7 +123,7 @@ class ETFOpenPredictor:
             self.cfg.lookback_days = lookback_days
         if etf_symbol:
             self.cfg.etf_symbol = str(etf_symbol)
-        logger.info(f"[run] config: {self.cfg}")
+        logger.info("run.start", **asdict(self.cfg))
 
         today = datetime.date.today()
         start = today - datetime.timedelta(days=self.cfg.lookback_days * 2)
@@ -135,7 +131,7 @@ class ETFOpenPredictor:
         df_etf = self.fetch_data(self.cfg.etf_symbol, start, today)
         df_ndx = self.fetch_data(self.cfg.ndx_symbol, start, today)
         if df_etf.empty or df_ndx.empty:
-            logger.error("[run] ETF or NDX data missing, aborting")
+            logger.error("run.error", message="ETF or NDX data missing")
             return
 
         df_nq = self.fetch_data(self.cfg.nq_symbol, start, today)
@@ -144,13 +140,17 @@ class ETFOpenPredictor:
 
         df = self.prepare_features(df_etf, df_ndx, df_nq, df_vix, df_fx)
         if df.empty:
-            logger.error("[run] No sufficient data after preprocessing")
+            logger.error("run.error", message="Insufficient data after preprocessing")
             return
 
         df_pred = self.rolling_predict(df)
         latest = df_pred.iloc[-1]
-        logger.info(f"[run] Date: {latest.name.date()}")
-        logger.info(f"[run] Predicted ETF Open: {latest['pred_open']:.4f}")
+        result = {"date": str(latest.name.date()), "pred_open": latest['pred_open']}
+        logger.info("run.end", **result)
+        # Also write result JSON separately
+        with open("result.json", "w") as f:
+            import json
+            json.dump({**asdict(self.cfg), **result}, f, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":
