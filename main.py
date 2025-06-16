@@ -1,106 +1,151 @@
-# Updated script replacing deprecated fillna(method='ffill') with .ffill()
+# Updated main.py with symbol conversion to str for isdigit check
 
-import argparse
-import pandas as pd
-import numpy as np
+# requirements: pip install yfinance akshare fire loguru pandas numpy
+
+from dataclasses import dataclass
+from typing import Optional
 import datetime
 
-def fetch_data_yfinance(symbol, start, end, interval='1d'):
-    import yfinance as yf
-    df = yf.download(symbol, start=start, end=end, interval=interval,
-                     auto_adjust=False, progress=False)
-    return df
+import pandas as pd
+import numpy as np
+import fire
+from loguru import logger
 
-def fetch_data_akshare(symbol, start, end):
-    import akshare as ak
-    df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                             start_date=start.strftime("%Y%m%d"),
-                             end_date=end.strftime("%Y%m%d"), adjust="")
-    if df.empty:
-        return df
-    df = df.rename(columns={
-        "日期": "Date",
-        "开盘": "Open",
-        "收盘": "Close",
-        "最高": "High",
-        "最低": "Low",
-        "成交量": "Volume"
-    }).set_index("Date")
-    df.index = pd.to_datetime(df.index)
-    return df
 
-def fetch_data(symbol, start, end, source, interval='1d'):
-    if source == "akshare" and symbol.isdigit():
-        df = fetch_data_akshare(symbol, start, end)
-        if not df.empty:
+@dataclass
+class PredictorConfig:
+    etf_symbol: str = "159941.SZ"
+    ndx_symbol: str = "^NDX"
+    nq_symbol: str = "NQ=F"
+    vix_symbol: str = "^VIX"
+    fx_symbol: str = "USDCNY=X"
+    lookback_days: int = 60
+    source: str = "yfinance"  # or "akshare"
+    interval: str = "1d"
+
+
+class ETFOpenPredictor:
+    def __init__(self, config: Optional[PredictorConfig] = None):
+        self.cfg = config or PredictorConfig()
+        logger.add(lambda msg: print(msg, end=""), level="INFO")
+
+    def fetch_yfinance(self, symbol: str, start: datetime.date, end: datetime.date):
+        import yfinance as yf
+        logger.info(f"Downloading {symbol} via yfinance")
+        return yf.download(symbol,
+                           start=start,
+                           end=end,
+                           interval=self.cfg.interval,
+                           auto_adjust=False,
+                           progress=False)
+
+    def fetch_akshare(self, symbol: str, start: datetime.date, end: datetime.date):
+        import akshare as ak
+        logger.info(f"Downloading {symbol} via akshare")
+        df = ak.stock_zh_a_hist(
+            symbol=str(symbol),
+            period="daily",
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+            adjust=""
+        )
+        if df.empty:
+            logger.warning(f"No data for {symbol} from akshare")
             return df
-        else:
-            print(f"Warning: akshare 无数据，回退到 yfinance 获取 {symbol}")
-    return fetch_data_yfinance(symbol, start, end, interval)
+        df = (
+            df.rename(columns={
+                "日期": "Date",
+                "开盘": "Open",
+                "收盘": "Close",
+                "最高": "High",
+                "最低": "Low",
+                "成交量": "Volume"
+            })
+              .set_index("Date")
+        )
+        df.index = pd.to_datetime(df.index)
+        return df
 
-def prepare_features(df_etf, df_ndx, df_nq, df_vix, df_fx):
-    df = pd.DataFrame(index=df_etf.index)
-    df['ETF_close'] = df_etf['Close']
-    df['NDX']       = df_ndx['Close'].reindex(df.index).ffill()
-    df['NQ']        = df_nq['Close'].reindex(df.index).ffill()
-    df['VIX']       = df_vix['Close'].reindex(df.index).ffill()
-    df['USDCNY']    = df_fx['Close'].reindex(df.index).ffill()
-    df['ETF_prev']  = df['ETF_close'].shift(1)
-    df['FX_ret']        = df['USDCNY'].pct_change(fill_method=None)
-    df['volume_change'] = df_etf['Volume'].pct_change(fill_method=None)
-    df.dropna(inplace=True)
-    return df
+    def fetch_data(self, symbol, start: datetime.date, end: datetime.date):
+        sym_str = str(symbol)
+        if self.cfg.source == "akshare" and sym_str.isdigit():
+            df = self.fetch_akshare(sym_str, start, end)
+            if not df.empty:
+                return df
+            logger.info(f"Falling back to yfinance for {symbol}")
+        return self.fetch_yfinance(sym_str, start, end)
 
-def rolling_predict_np(df, lookback):
-    features = ['NDX', 'NQ', 'ETF_prev', 'FX_ret', 'volume_change']
-    preds = []
-    for i in range(lookback, len(df)):
-        window = df.iloc[i-lookback:i]
-        X = window[features].values
-        X_design = np.hstack([np.ones((X.shape[0], 1)), X])
-        y = window['ETF_close'].values
-        beta, *_ = np.linalg.lstsq(X_design, y, rcond=None)
-        x_today = np.hstack([1, df.iloc[i][features].values])
-        preds.append(x_today.dot(beta))
-    df_pred = df.iloc[lookback:].copy()
-    df_pred['pred_open'] = preds
-    return df_pred
+    def prepare_features(self, df_etf, df_ndx, df_nq, df_vix, df_fx):
+        logger.info("Preparing features")
+        df = pd.DataFrame(index=df_etf.index)
+        df["ETF_close"] = df_etf["Close"]
+        df["NDX"] = df_ndx["Close"].reindex(df.index).ffill()
+        df["NQ"] = df_nq["Close"].reindex(df.index).ffill()
+        df["VIX"] = df_vix["Close"].reindex(df.index).ffill()
+        df["USDCNY"] = df_fx["Close"].reindex(df.index).ffill()
+        df["ETF_prev"] = df["ETF_close"].shift(1)
+        df["FX_ret"] = df["USDCNY"].pct_change(fill_method=None)
+        df["volume_change"] = df_etf["Volume"].pct_change(fill_method=None)
+        df.dropna(inplace=True)
+        return df
 
-def main():
-    parser = argparse.ArgumentParser(description="ETF 开盘价滚动OLS预测")
-    parser.add_argument("--source", choices=["yfinance", "akshare"], default="yfinance",
-                        help="选择数据源：yfinance 或 akshare")
-    args = parser.parse_args()
+    def rolling_predict(self, df: pd.DataFrame):
+        logger.info(f"Running rolling window prediction with lookback={self.cfg.lookback_days}")
+        features = ["NDX", "NQ", "ETF_prev", "FX_ret", "volume_change"]
+        preds = []
+        for i in range(self.cfg.lookback_days, len(df)):
+            window = df.iloc[i - self.cfg.lookback_days : i]
+            X = window[features].values
+            X_design = np.hstack([np.ones((X.shape[0], 1)), X])
+            y = window["ETF_close"].values
+            beta, *_ = np.linalg.lstsq(X_design, y, rcond=None)
+            x_today = np.hstack([1, df.iloc[i][features].values])
+            preds.append(float(x_today.dot(beta)))
+        df_pred = df.iloc[self.cfg.lookback_days :].copy()
+        df_pred["pred_open"] = preds
+        return df_pred
 
-    ETF_SYMBOL = '159941'
-    NDX_SYMBOL = '^NDX'
-    NQ_SYMBOL = 'NQ=F'
-    VIX_SYMBOL = '^VIX'
-    FX_SYMBOL = 'USDCNY=X'
-    LOOKBACK_DAYS = 60
+    def run(self, 
+            source: Optional[str] = None,
+            lookback_days: Optional[int] = None,
+            etf_symbol: Optional[str] = None):
+        """Predict ETF open price.
 
-    today = datetime.date.today()
-    start = today - datetime.timedelta(days=LOOKBACK_DAYS*2)
+        Args:
+          source: 'yfinance' or 'akshare'
+          lookback_days: rolling window size
+          etf_symbol: ETF code without suffix for akshare
+        """
+        if source:
+            self.cfg.source = source
+        if lookback_days:
+            self.cfg.lookback_days = lookback_days
+        if etf_symbol:
+            self.cfg.etf_symbol = str(etf_symbol)
 
-    df_etf = fetch_data(ETF_SYMBOL, start, today, args.source)
-    df_ndx = fetch_data(NDX_SYMBOL, start, today, args.source)
-    df_nq  = fetch_data(NQ_SYMBOL, start, today, args.source)
-    df_vix = fetch_data(VIX_SYMBOL, start, today, args.source)
-    df_fx  = fetch_data(FX_SYMBOL, start, today, args.source)
+        today = datetime.date.today()
+        start = today - datetime.timedelta(days=self.cfg.lookback_days * 2)
 
-    if df_etf.empty or df_ndx.empty:
-        print("Error: ETF 或 NDX 数据缺失，无法继续")
-        return
+        df_etf = self.fetch_data(self.cfg.etf_symbol, start, today)
+        df_ndx = self.fetch_data(self.cfg.ndx_symbol, start, today)
+        if df_etf.empty or df_ndx.empty:
+            logger.error("ETF or NDX data missing, aborting")
+            return
 
-    df = prepare_features(df_etf, df_ndx, df_nq, df_vix, df_fx)
-    df_pred = rolling_predict_np(df, LOOKBACK_DAYS)
-    if df_pred.empty:
-        print("Error: 预处理后数据不足，无法预测")
-        return
+        df_nq = self.fetch_data(self.cfg.nq_symbol, start, today)
+        df_vix = self.fetch_data(self.cfg.vix_symbol, start, today)
+        df_fx = self.fetch_data(self.cfg.fx_symbol, start, today)
 
-    latest = df_pred.iloc[-1]
-    print(f"Date: {latest.name.date()}")
-    print(f"Predicted ETF Open (源={args.source}): {latest['pred_open']:.4f}")
+        df = self.prepare_features(df_etf, df_ndx, df_nq, df_vix, df_fx)
+        if df.empty:
+            logger.error("No sufficient data after preprocessing")
+            return
+
+        df_pred = self.rolling_predict(df)
+        latest = df_pred.iloc[-1]
+        logger.info(f"Date: {latest.name.date()}")
+        logger.info(f"Predicted ETF Open: {latest['pred_open']:.4f}")
+
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(ETFOpenPredictor)
