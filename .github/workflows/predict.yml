@@ -43,26 +43,26 @@ jobs:
           echo "date=$DATE" >> $GITHUB_OUTPUT
           echo "pred_open=$PRED" >> $GITHUB_OUTPUT
 
-      - name: Create or update GitHub Issue
-        if: |
-          github.event_name == 'schedule' ||
-          github.event_name == 'workflow_dispatch' ||
-          (github.event_name == 'push' && github.ref == 'refs/heads/dev-ci')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PREFIX=""
-          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/dev-ci" ]; then
-            PREFIX="test: "
-          fi
-          TITLE="$PREFIX${{ steps.read_result.outputs.date }}: 159941 开盘预测"
-          BODY="**预测结果**：\n\`\`\`json\n$(cat result.json)\n\`\`\`"
-          EXISTING=$(gh issue list --search "$TITLE" --json number --jq '.[0].number')
-          if [ "$EXISTING" = "null" ] || [ -z "$EXISTING" ]; then
-            gh issue create --title "$TITLE" --body "$BODY" --label prediction
-          else
-            gh issue comment $EXISTING --body "$BODY"
-          fi
+      # - name: Create or update GitHub Issue
+      #   if: |
+      #     github.event_name == 'schedule' ||
+      #     github.event_name == 'workflow_dispatch' ||
+      #     (github.event_name == 'push' && github.ref == 'refs/heads/dev-ci')
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #   run: |
+      #     PREFIX=""
+      #     if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/dev-ci" ]; then
+      #       PREFIX="test: "
+      #     fi
+      #     TITLE="$PREFIX${{ steps.read_result.outputs.date }}: 159941 开盘预测"
+      #     BODY="**预测结果**：\n\`\`\`json\n$(cat result.json)\n\`\`\`"
+      #     EXISTING=$(gh issue list --search "$TITLE" --json number --jq '.[0].number')
+      #     if [ "$EXISTING" = "null" ] || [ -z "$EXISTING" ]; then
+      #       gh issue create --title "$TITLE" --body "$BODY" --label prediction
+      #     else
+      #       gh issue comment $EXISTING --body "$BODY"
+      #     fi
 
       - name: Print result to CI log
         if: |
