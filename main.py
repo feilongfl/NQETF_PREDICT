@@ -78,13 +78,25 @@ class ETFOpenPredictor:
 
         idx = df_etf.index
         fx_shift = df_fx["Close"].reindex(idx).shift(1)
-        ndx_cny = (df_ndx["Close"] * fx_shift).reindex(idx)
-        nq_cny  = (df_nq["Close"]  * fx_shift).reindex(idx)
+
+        def ensure_series(df_col):
+            if isinstance(df_col, pd.Series):
+                return df_col
+            elif isinstance(df_col, pd.DataFrame):
+                return df_col.iloc[:, 0]
+            else:
+                raise ValueError("Unexpected type for df_col")
+
+        ndx_close = ensure_series(df_ndx["Close"])
+        nq_close = ensure_series(df_nq["Close"])
+
+        ndx_cny = (ndx_close * fx_shift).reindex(idx)
+        nq_cny  = (nq_close * fx_shift).reindex(idx)
 
         df = pd.DataFrame(index=idx)
         df["NDX_ret"] = np.log(ndx_cny).diff()
         df["NQ_ret"]  = np.log(nq_cny).diff()
-        df["VIX_ret"] = np.log(df_vix["Close"].reindex(idx)).diff()
+        df["VIX_ret"] = np.log(ensure_series(df_vix["Close"]).reindex(idx)).diff()
         df["ETF_close_log"] = np.log(df_etf["Close"].shift(1))
         df["ETF_open_log"] = np.log(df_etf["Open"])
 
