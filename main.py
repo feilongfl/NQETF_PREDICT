@@ -75,32 +75,60 @@ class ETFOpenPredictor:
         return self.fetch_yfinance(sym_str, start, end)
 
     def prepare_features(self, df_etf, df_ndx, df_nq, df_vix, df_fx):
+        """
+        生成对齐后的特征。
+        所有美股数据先换算成人民币，再取对数收益率；目标是次日 ETF 开盘价。
+        """
         logger.info("prepare_features.start", lookback_days=self.cfg.lookback_days)
-        df = pd.DataFrame(index=df_etf.index)
-        df["ETF_close"] = df_etf["Close"]
-        df["NDX"] = df_ndx["Close"].reindex(df.index).ffill()
-        df["NQ"] = df_nq["Close"].reindex(df.index).ffill()
-        df["VIX"] = df_vix["Close"].reindex(df.index).ffill()
-        df["USDCNY"] = df_fx["Close"].reindex(df.index).ffill()
-        df["ETF_prev"] = df["ETF_close"].shift(1)
-        df["FX_ret"] = df["USDCNY"].pct_change(fill_method=None)
-        df["volume_change"] = df_etf["Volume"].pct_change(fill_method=None)
+
+        # 对齐交易日索引（用 ETF 交易日作为主轴）
+        idx = df_etf.index
+        fx_shift = df_fx["Close"].reindex(idx).shift(1)      # 前一自然日汇率
+
+        # 价格 → 人民币，再取 log-return（先对齐再 shift）
+        ndx_cny = (df_ndx["Close"] * fx_shift).reindex(idx)
+        nq_cny  = (df_nq["Close"]  * fx_shift).reindex(idx)
+
+        df = pd.DataFrame(index=idx)
+
+        # 特征：前一天到今天的 log-return
+        df["NDX_ret"] = np.log(ndx_cny).diff()
+        df["NQ_ret"]  = np.log(nq_cny).diff()
+        df["VIX_ret"] = np.log(df_vix["Close"].reindex(idx)).diff()
+
+        # 前一日 ETF 收盘（取 log）
+        df["ETF_close_log"] = np.log(df_etf["Close"].shift(1))
+
+        # 目标：今天 ETF 开盘（取 log）
+        df["ETF_open_log"] = np.log(df_etf["Open"])
+
         df.dropna(inplace=True)
         logger.info("prepare_features.end", rows=len(df), columns=list(df.columns))
         return df
 
+
     def rolling_predict(self, df: pd.DataFrame):
+        """
+        用滚动 OLS 预测 log(ETF_open)；预测值再取 exp 还原为价格。
+        """
         logger.info("rolling_predict.start", rows=len(df), lookback_days=self.cfg.lookback_days)
-        features = ["NDX", "NQ", "ETF_prev", "FX_ret", "volume_change"]
+        features = ["NDX_ret", "NQ_ret", "VIX_ret", "ETF_close_log"]
         preds = []
+        betas = []                       # 可选：记录回归系数（含 γ）
+
         for i in range(self.cfg.lookback_days, len(df)):
             window = df.iloc[i - self.cfg.lookback_days : i]
             X = window[features].values
-            X_design = np.hstack([np.ones((X.shape[0], 1)), X])
-            y = window["ETF_close"].values
+            X_design = np.hstack([np.ones((X.shape[0], 1)), X])      # 加截距
+            y = window["ETF_open_log"].values
+
             beta, *_ = np.linalg.lstsq(X_design, y, rcond=None)
+            betas.append(beta)            # 若需查看 γ，可取 beta[2] (对应 NQ_ret)
+
             x_today = np.hstack([1, df.iloc[i][features].values])
-            preds.append(float(x_today.dot(beta)))
+            pred_log = x_today.dot(beta)
+            preds.append(float(np.exp(pred_log)))     # 还原为价格
+
         df_pred = df.iloc[self.cfg.lookback_days :].copy()
         df_pred["pred_open"] = preds
         logger.info("rolling_predict.end", predictions=len(preds))
